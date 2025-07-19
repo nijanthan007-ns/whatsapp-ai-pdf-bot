@@ -6,6 +6,7 @@ from langchain.text_splitter import CharacterTextSplitter
 import os
 import glob
 import gdown
+import requests
 
 app = FastAPI()
 
@@ -14,6 +15,8 @@ EMBEDDINGS = OpenAIEmbeddings(openai_api_key=OPENAI_API_KEY)
 VECTORSTORE_PATH = "vectorstore"
 DOCS_DIR = "docs"
 GOOGLE_DRIVE_FOLDER_ID = "1dx5CkR3no8J1wjWR4ZVcK6HTbSqlm09R"
+ULTRAMSG_INSTANCE_ID = os.environ.get("ULTRAMSG_INSTANCE_ID")
+ULTRAMSG_TOKEN = os.environ.get("ULTRAMSG_TOKEN")
 
 def download_pdfs_from_drive():
     print("📥 Downloading PDFs from Google Drive folder...")
@@ -56,6 +59,26 @@ def root():
 
 @app.post("/webhook")
 async def webhook(request: Request):
-    body = await request.json()
-    print("📩 Webhook received:", body)
-    return {"message": "Received"}
+    data = await request.json()
+    print("📩 Webhook received:", data)
+
+    try:
+        sender = data['data']['from']
+        message = data['data']['body']
+
+        docs = db.similarity_search(message, k=3)
+        answer = docs[0].page_content if docs else "Sorry, I couldn't find anything."
+
+        send_url = f"https://api.ultramsg.com/{ULTRAMSG_INSTANCE_ID}/messages/chat"
+        payload = {
+            "token": ULTRAMSG_TOKEN,
+            "to": sender,
+            "body": answer
+        }
+        r = requests.post(send_url, data=payload)
+        print("📤 Sent reply:", r.text)
+
+    except Exception as e:
+        print("❌ Error:", e)
+
+    return {"status": "ok"}
