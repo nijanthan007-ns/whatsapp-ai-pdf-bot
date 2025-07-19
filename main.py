@@ -1,60 +1,76 @@
 import os
+import shutil
+import requests
 from fastapi import FastAPI, Request
+from fastapi.responses import JSONResponse
 from langchain_community.document_loaders import PyPDFLoader
-from langchain_community.embeddings import OpenAIEmbeddings
+from langchain.text_splitter import CharacterTextSplitter
 from langchain_community.vectorstores import FAISS
-from langchain.text_splitter import RecursiveCharacterTextSplitter
-from langchain.chat_models import ChatOpenAI
+from langchain_openai import OpenAIEmbeddings, ChatOpenAI
 from langchain.chains.question_answering import load_qa_chain
-from pydantic import BaseModel
-import glob
+from langchain.prompts import PromptTemplate
+from dotenv import load_dotenv
 
-# ⚙️ Config
-OPENAI_API_KEY = os.getenv("OPENAI_API_KEY")
-ULTRAMSG_TOKEN = os.getenv("ULTRAMSG_TOKEN")
-ULTRAMSG_INSTANCE_ID = os.getenv("ULTRAMSG_INSTANCE_ID")
+load_dotenv()
 
-# ✅ Load PDFs from local /docs folder
-def load_docs_from_folder(folder_path="docs"):
-    print("📄 Loading documents from local folder...")
+app = FastAPI()
+
+# Constants
+PDF_FOLDER = "docs"
+
+# Load documents from GitHub docs folder
+def load_documents():
+    if not os.path.exists(PDF_FOLDER):
+        raise FileNotFoundError("📁 'docs' folder not found. Please ensure your PDFs are in a 'docs' directory.")
+
     documents = []
-    for file_path in glob.glob(f"{folder_path}/*.pdf"):
-        try:
-            loader = PyPDFLoader(file_path)
-            documents.extend(loader.load())
-        except Exception as e:
-            print(f"⚠️ Failed to load {file_path}: {e}")
-    if not documents:
-        raise ValueError("⚠️ No documents were loaded. Make sure your PDFs are text-based.")
+    for filename in os.listdir(PDF_FOLDER):
+        if filename.endswith(".pdf"):
+            loader = PyPDFLoader(os.path.join(PDF_FOLDER, filename))
+            docs = loader.load()
+            documents.extend(docs)
     return documents
 
-# ⛓️ Setup chain
-def setup_chain():
-    docs = load_docs_from_folder()
-    text_splitter = RecursiveCharacterTextSplitter(chunk_size=1000, chunk_overlap=200)
-    texts = text_splitter.split_documents(docs)
+# Split documents into chunks
+def split_documents(documents):
+    splitter = CharacterTextSplitter(chunk_size=1000, chunk_overlap=200)
+    return splitter.split_documents(documents)
+
+# Create vector store
+def create_vectorstore(chunks):
     embeddings = OpenAIEmbeddings()
-    db = FAISS.from_documents(texts, embeddings)
-    chain = load_qa_chain(ChatOpenAI(temperature=0), chain_type="stuff")
-    return db, chain
+    return FAISS.from_documents(chunks, embeddings)
 
-# 🌐 FastAPI app
-app = FastAPI()
-db, chain = setup_chain()
+# Create QA chain
+def create_chain():
+    llm = ChatOpenAI(temperature=0.2)
+    prompt_template = """Use the following context to answer the question in simple terms:
 
-# 📩 WhatsApp message input
-class Message(BaseModel):
-    to: str
-    message: str
+{context}
 
-# 📬 WhatsApp route
-@app.post("/webhook")
-async def webhook(request: Request):
+Question: {question}
+Answer:"""
+    PROMPT = PromptTemplate(template=prompt_template, input_variables=["context", "question"])
+    return load_qa_chain(llm, chain_type="stuff", prompt=PROMPT)
+
+# Load knowledge base
+print("📄 Loading documents from GitHub 'docs' folder...")
+docs = load_documents()
+if not docs:
+    raise ValueError("⚠️ No documents were loaded. Make sure the 'docs' folder contains valid PDF files.")
+chunks = split_documents(docs)
+db = create_vectorstore(chunks)
+chain = create_chain()
+print("✅ Knowledge base ready.")
+
+# WhatsApp handler route
+@app.post("/")
+async def whatsapp_webhook(request: Request):
     data = await request.json()
-    msg = data.get("message", "")
-    sender = data.get("from", "")
-    print(f"📥 Message from {sender}: {msg}")
-    docs = db.similarity_search(msg)
-    answer = chain.run(input_documents=docs, question=msg)
-    print(f"🤖 Answer: {answer}")
-    return {"reply": answer}
+    user_msg = data.get("message")
+    if not user_msg:
+        return JSONResponse(content={"reply": "No message received."})
+
+    docs = db.similarity_search(user_msg)
+    response = chain.run(input_documents=docs, question=user_msg)
+    return JSONResponse(content={"reply": response})
