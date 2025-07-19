@@ -1,8 +1,9 @@
 openai
 langchain
+langchain-community
 faiss-cpu
-tiktoken
 gdown
 pypdf
+tiktoken
 fastapi
 uvicorn
