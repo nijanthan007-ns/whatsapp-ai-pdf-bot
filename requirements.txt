@@ -1,7 +1,8 @@
 fastapi
 uvicorn
 requests
-langchain
 openai
 faiss-cpu
 pypdf
+langchain
+langchain-community
