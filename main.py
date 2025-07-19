@@ -27,6 +27,7 @@ def load_pdfs():
     return docs
 
 # Process & embed PDF data
+# Process & embed PDF data
 print("Loading and processing PDFs...")
 documents = load_pdfs()
 splitter = RecursiveCharacterTextSplitter(chunk_size=1000, chunk_overlap=100)
@@ -34,4 +35,4 @@ chunks = splitter.split_documents(documents)
 
 # Vector store setup
 print("Creating vector store...")
-vectorstore = FAISS.from_documents(chun_
+vectorstore = FAISS.from_documents(chunks, embeddings)
