@@ -1,10 +1,9 @@
-fastapi
-uvicorn
-requests
-beautifulsoup4
 langchain
 langchain-community
-openai
-faiss-cpu
-pypdf
+langchain-openai
 tiktoken
+faiss-cpu
+openai
+PyMuPDF
+uvicorn
+fastapi
