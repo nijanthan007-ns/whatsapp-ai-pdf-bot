@@ -1,9 +1,9 @@
-openai
-langchain
-langchain-community
-faiss-cpu
-gdown
-pypdf
-tiktoken
 fastapi
 uvicorn
+requests
+beautifulsoup4
+langchain
+langchain-community
+openai
+faiss-cpu
+pypdf
