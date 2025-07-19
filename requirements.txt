@@ -5,3 +5,4 @@ langchain
 gdown
 PyPDF2
 faiss-cpu
+langchain-community
