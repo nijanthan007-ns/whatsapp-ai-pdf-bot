@@ -1,84 +1,69 @@
-from fastapi import FastAPI, Request
-from langchain_community.vectorstores import FAISS
-from langchain_community.embeddings import OpenAIEmbeddings
-from langchain_community.document_loaders import PyPDFLoader
-from langchain.text_splitter import CharacterTextSplitter
 import os
-import glob
+import zipfile
 import gdown
-import requests
+from fastapi import FastAPI, Request
+from fastapi.responses import JSONResponse
+from langchain_community.vectorstores import FAISS
+from langchain_community.document_loaders import PyPDFLoader
+from langchain.embeddings.openai import OpenAIEmbeddings
+from langchain.text_splitter import CharacterTextSplitter
+from langchain.chains.question_answering import load_qa_chain
+from langchain.chat_models import ChatOpenAI
 
-app = FastAPI()
+# Step 1: Download and extract PDFs from Google Drive ZIP
+def download_and_extract_zip():
+    file_id = "1_igDhNY5GstbpAMxvmM1B4gTtFsXwrv_"  # Your GDrive file ID
+    url = f"https://drive.google.com/uc?id={file_id}"
+    zip_path = "manuals.zip"
+    extract_path = "pdfs"
 
-OPENAI_API_KEY = os.environ["OPENAI_API_KEY"]
-EMBEDDINGS = OpenAIEmbeddings(openai_api_key=OPENAI_API_KEY)
-VECTORSTORE_PATH = "vectorstore"
-DOCS_DIR = "docs"
-GOOGLE_DRIVE_FOLDER_ID = "1dx5CkR3no8J1wjWR4ZVcK6HTbSqlm09R"
-ULTRAMSG_INSTANCE_ID = os.environ.get("ULTRAMSG_INSTANCE_ID")
-ULTRAMSG_TOKEN = os.environ.get("ULTRAMSG_TOKEN")
+    if not os.path.exists(zip_path):
+        print("📥 Downloading ZIP from Google Drive...")
+        gdown.download(url, zip_path, quiet=False)
 
-def download_pdfs_from_drive():
-    print("📥 Downloading PDFs from Google Drive folder...")
-    os.makedirs(DOCS_DIR, exist_ok=True)
-    gdown.download_folder(id=GOOGLE_DRIVE_FOLDER_ID, output=DOCS_DIR, quiet=False, use_cookies=False)
-    print("✅ Download complete.")
+    if not os.path.exists(extract_path):
+        print("📦 Extracting ZIP...")
+        with zipfile.ZipFile(zip_path, 'r') as zip_ref:
+            zip_ref.extractall(extract_path)
 
+# Step 2: Load PDFs and build vectorstore
 def build_vectorstore():
-    if not os.path.exists(DOCS_DIR) or len(glob.glob(f"{DOCS_DIR}/*.pdf")) == 0:
-        download_pdfs_from_drive()
-
+    download_and_extract_zip()
+    data_path = "pdfs"
     all_docs = []
-    pdf_files = glob.glob(f"{DOCS_DIR}/*.pdf")
-    for pdf in pdf_files:
-        loader = PyPDFLoader(pdf)
-        all_docs.extend(loader.load())
 
-    splitter = CharacterTextSplitter(chunk_size=1000, chunk_overlap=100)
-    texts = splitter.split_documents(all_docs)
+    for filename in os.listdir(data_path):
+        if filename.endswith(".pdf"):
+            pdf_path = os.path.join(data_path, filename)
+            loader = PyPDFLoader(pdf_path)
+            all_docs.extend(loader.load())
 
-    db = FAISS.from_documents(texts, EMBEDDINGS)
-    db.save_local(VECTORSTORE_PATH)
-    print("✅ Vectorstore created and saved.")
-    return db
+    splitter = CharacterTextSplitter(chunk_size=1000, chunk_overlap=200)
+    docs = splitter.split_documents(all_docs)
 
-# Load or create vectorstore
-if os.path.exists(f"{VECTORSTORE_PATH}/index.faiss"):
-    db = FAISS.load_local(
-        VECTORSTORE_PATH,
-        EMBEDDINGS,
-        allow_dangerous_deserialization=True
-    )
-    print("📂 Loaded existing vectorstore.")
-else:
-    db = build_vectorstore()
+    embeddings = OpenAIEmbeddings()
+    vectorstore = FAISS.from_documents(docs, embedding=embeddings)
+    return vectorstore
 
-@app.get("/")
-def root():
-    return {"status": "Bot is running ✅"}
+# Step 3: Setup FastAPI app
+app = FastAPI()
+vectorstore = build_vectorstore()
+llm = ChatOpenAI(model="gpt-3.5-turbo")
+chain = load_qa_chain(llm, chain_type="stuff")
 
-@app.post("/webhook")
-async def webhook(request: Request):
-    data = await request.json()
-    print("📩 Webhook received:", data)
-
+# Step 4: WhatsApp / POST endpoint
+@app.post("/ask")
+async def ask_question(request: Request):
     try:
-        sender = data['data']['from']
-        message = data['data']['body']
+        body = await request.json()
+        question = body.get("question")
 
-        docs = db.similarity_search(message, k=3)
-        answer = docs[0].page_content if docs else "Sorry, I couldn't find anything."
+        if not question:
+            return JSONResponse(status_code=400, content={"error": "Missing 'question' field"})
 
-        send_url = f"https://api.ultramsg.com/{ULTRAMSG_INSTANCE_ID}/messages/chat"
-        payload = {
-            "token": ULTRAMSG_TOKEN,
-            "to": sender,
-            "body": answer
-        }
-        r = requests.post(send_url, data=payload)
-        print("📤 Sent reply:", r.text)
+        docs = vectorstore.similarity_search(question)
+        answer = chain.run(input_documents=docs, question=question)
+        return {"answer": answer}
 
     except Exception as e:
-        print("❌ Error:", e)
-
-    return {"status": "ok"}
+        return JSONResponse(status_code=500, content={"error": str(e)})
