@@ -1,94 +1,89 @@
 import os
-import requests
-import tempfile
 from fastapi import FastAPI, Request
+from pydantic import BaseModel
+from langchain.text_splitter import CharacterTextSplitter
 from langchain_community.document_loaders import PyPDFLoader
-from langchain.text_splitter import RecursiveCharacterTextSplitter
-from langchain.embeddings.openai import OpenAIEmbeddings
+from langchain_community.embeddings import OpenAIEmbeddings
 from langchain_community.vectorstores import FAISS
-from langchain.chains import RetrievalQA
-from langchain.chat_models import ChatOpenAI
-from fastapi.responses import JSONResponse
-from fastapi.middleware.cors import CORSMiddleware
-import shutil
+from langchain.chains.question_answering import load_qa_chain
+from langchain.llms import OpenAI
+import requests
 from bs4 import BeautifulSoup
 
-# CONFIG
-os.environ["OPENAI_API_KEY"] = os.getenv("OPENAI_API_KEY")
-ULTRAMSG_INSTANCE_ID = os.getenv("ULTRAMSG_INSTANCE_ID")
-ULTRAMSG_TOKEN = os.getenv("ULTRAMSG_TOKEN")
-GDRIVE_FOLDER_URL = "https://drive.google.com/drive/folders/1dx5CkR3no8J1wjWR4ZVcK6HTbSqlm09R"
+OPENAI_API_KEY = os.environ.get("OPENAI_API_KEY")
+ULTRAMSG_INSTANCE_ID = os.environ.get("ULTRAMSG_INSTANCE_ID")
+ULTRAMSG_TOKEN = os.environ.get("ULTRAMSG_TOKEN")
+
+def download_google_drive_folder(folder_url, download_path="pdfs"):
+    if not os.path.exists(download_path):
+        os.makedirs(download_path)
+    response = requests.get(folder_url)
+    soup = BeautifulSoup(response.text, "html.parser")
+    links = soup.select("a")
+    for link in links:
+        href = link.get("href", "")
+        if "/file/d/" in href:
+            file_id = href.split("/file/d/")[1].split("/")[0]
+            file_name = link.text.strip() or f"{file_id}.pdf"
+            download_url = f"https://drive.google.com/uc?export=download&id={file_id}"
+            file_path = os.path.join(download_path, file_name)
+            with requests.get(download_url, stream=True) as r:
+                with open(file_path, "wb") as f:
+                    for chunk in r.iter_content(chunk_size=8192):
+                        if chunk:
+                            f.write(chunk)
+    print("✅ PDFs downloaded from Google Drive.")
+
+def load_documents(pdf_folder="pdfs"):
+    documents = []
+    for file in os.listdir(pdf_folder):
+        if file.endswith(".pdf"):
+            loader = PyPDFLoader(os.path.join(pdf_folder, file))
+            raw_docs = loader.load()
+            splitter = CharacterTextSplitter(chunk_size=1000, chunk_overlap=200)
+            chunks = splitter.split_documents(raw_docs)
+            documents.extend(chunks)
+    return documents
 
 app = FastAPI()
-app.add_middleware(
-    CORSMiddleware,
-    allow_origins=["*"],
-    allow_credentials=True,
-    allow_methods=["*"],
-    allow_headers=["*"],
-)
 
-vectorstore = None
-
-def download_gdrive_folder(gdrive_url):
-    print("Downloading PDFs from Google Drive folder...")
-    response = requests.get(gdrive_url)
-    soup = BeautifulSoup(response.text, 'html.parser')
-    pdf_links = ["https://drive.google.com/uc?id=" + tag['href'].split("/")[5] for tag in soup.find_all("a") if "/file/d/" in tag.get("href", "")]
-
-    temp_dir = tempfile.mkdtemp()
-    for link in pdf_links:
-        file_id = link.split("id=")[-1]
-        download_url = f"https://drive.google.com/uc?export=download&id={file_id}"
-        file_path = os.path.join(temp_dir, file_id + ".pdf")
-        with requests.get(download_url, stream=True) as r:
-            with open(file_path, 'wb') as f:
-                shutil.copyfileobj(r.raw, f)
-
-    return temp_dir
-
-def build_vectorstore():
-    global vectorstore
-    pdf_dir = download_gdrive_folder(GDRIVE_FOLDER_URL)
-
-    all_docs = []
-    for pdf_file in os.listdir(pdf_dir):
-        loader = PyPDFLoader(os.path.join(pdf_dir, pdf_file))
-        all_docs.extend(loader.load())
-
-    text_splitter = RecursiveCharacterTextSplitter(chunk_size=1000, chunk_overlap=200)
-    texts = text_splitter.split_documents(all_docs)
-    embeddings = OpenAIEmbeddings()
-    vectorstore = FAISS.from_documents(texts, embeddings)
-    print("Vector store built successfully!")
-
-@app.on_event("startup")
-async def startup_event():
-    build_vectorstore()
+class WhatsAppMsg(BaseModel):
+    from_: str
+    body: str
 
 @app.post("/webhook")
 async def whatsapp_webhook(request: Request):
-    global vectorstore
     data = await request.json()
-    message = data.get("message", "")
-    sender = data.get("sender", "")
+    msg = data.get("body")
+    sender = data.get("from")
 
-    if not message or not sender:
-        return JSONResponse(content={"error": "Invalid message format"}, status_code=400)
+    print(f"📩 Received: {msg}")
 
-    llm = ChatOpenAI(temperature=0)
-    qa_chain = RetrievalQA.from_chain_type(llm=llm, retriever=vectorstore.as_retriever())
-    answer = qa_chain.run(message)
+    docs = vectorstore.similarity_search(msg)
+    response = chain.run(input_documents=docs, question=msg)
 
-    response_url = f"https://api.ultramsg.com/{ULTRAMSG_INSTANCE_ID}/messages/chat"
+    reply_url = f"https://api.ultramsg.com/{ULTRAMSG_INSTANCE_ID}/messages/chat"
     payload = {
         "token": ULTRAMSG_TOKEN,
         "to": sender,
-        "body": answer
+        "body": response
     }
-    requests.post(response_url, data=payload)
-    return {"status": "sent", "answer": answer}
+    requests.post(reply_url, data=payload)
 
-@app.get("/")
-def root():
-    return {"status": "running"}
+    return {"success": True}
+
+print("📥 Downloading PDFs from Google Drive folder...")
+download_google_drive_folder("https://drive.google.com/drive/folders/1dx5CkR3no8J1wjWR4ZVcK6HTbSqlm09R")
+
+print("📄 Loading documents...")
+documents = load_documents()
+
+if not documents:
+    raise ValueError("⚠️ No documents were loaded. Make sure the PDFs are text-based and public.")
+
+print(f"✅ Loaded {len(documents)} chunks.")
+
+embedding = OpenAIEmbeddings(openai_api_key=OPENAI_API_KEY)
+vectorstore = FAISS.from_documents(documents, embedding)
+llm = OpenAI(temperature=0, openai_api_key=OPENAI_API_KEY)
+chain = load_qa_chain(llm, chain_type="stuff")
